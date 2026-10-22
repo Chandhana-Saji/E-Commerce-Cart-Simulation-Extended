@@ -2,6 +2,7 @@
 package database.gui;
 
 import database.DatabaseConnection;
+import database.QueueManager;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
@@ -227,6 +228,111 @@ public class ProductFrame extends JFrame {
         JButton addToCartButton = new JButton("Add to Cart");
         addToCartButton.setAlignmentX(Component.CENTER_ALIGNMENT);
         addToCartButton.setEnabled(stock > 0);
+        JButton queueButton = new JButton("Join Waiting Queue");
+queueButton.setAlignmentX(Component.CENTER_ALIGNMENT);
+queueButton.setVisible(stock == 0);
+
+queueButton.addActionListener(new ActionListener() {
+    public void actionPerformed(ActionEvent e) {
+
+        String input = JOptionPane.showInputDialog(
+                ProductFrame.this,
+                "Enter quantity:",
+                "Join Waiting Queue",
+                JOptionPane.QUESTION_MESSAGE
+        );
+
+        if (input == null) {
+            return;
+        }
+
+        try {
+            int quantity = Integer.parseInt(input);
+
+            QueueManager queueManager = new QueueManager();
+
+            boolean joined = queueManager.joinQueue(
+                    customerId,
+                    productId,
+                    quantity
+            );
+
+            if (joined) {
+
+                String sql = """
+                    SELECT queue_id
+                    FROM Waiting_Queue
+                    WHERE customer_id = ?
+                      AND product_id = ?
+                      AND status = 'WAITING'
+                    ORDER BY queue_id DESC
+                    LIMIT 1
+                    """;
+
+                try (
+                    Connection connection =
+                            DatabaseConnection.getConnection();
+                    PreparedStatement statement =
+                            connection.prepareStatement(sql)
+                ) {
+
+                    statement.setInt(1, customerId);
+                    statement.setInt(2, productId);
+
+                    try (ResultSet result =
+                                 statement.executeQuery()) {
+
+                        if (result.next()) {
+
+                            int queueId =
+                                    result.getInt("queue_id");
+
+                            int position =
+                                    queueManager.getQueuePosition(
+                                            queueId
+                                    );
+
+                            JOptionPane.showMessageDialog(
+                                    ProductFrame.this,
+                                    "You joined the waiting queue!\n"
+                                    + "Queue Position: "
+                                    + position,
+                                    "Waiting Queue",
+                                    JOptionPane.INFORMATION_MESSAGE
+                            );
+                        }
+                    }
+                }
+
+            } else {
+                JOptionPane.showMessageDialog(
+                        ProductFrame.this,
+                        "Unable to join the waiting queue.",
+                        "Waiting Queue",
+                        JOptionPane.WARNING_MESSAGE
+                );
+            }
+
+        } catch (NumberFormatException ex) {
+
+            JOptionPane.showMessageDialog(
+                    ProductFrame.this,
+                    "Please enter a valid quantity.",
+                    "Invalid Quantity",
+                    JOptionPane.WARNING_MESSAGE
+            );
+        } catch (Exception ex) {
+
+            JOptionPane.showMessageDialog(
+                    ProductFrame.this,
+                    "Queue operation failed: "
+                    + ex.getMessage(),
+                    "Error",
+                    JOptionPane.ERROR_MESSAGE
+            );
+        }
+    }
+});
 
         
 
@@ -255,6 +361,8 @@ addToCartButton.addActionListener(new ActionListener() {
         card.add(stockLabel);
         card.add(Box.createVerticalStrut(10));
         card.add(addToCartButton);
+        card.add(Box.createVerticalStrut(5));
+card.add(queueButton);
 
         return card;
     }
