@@ -1,5 +1,7 @@
 
 import database.ProductDAO;
+import java.util.ArrayList;
+import java.util.List;
 
 public class ProductManager {
 
@@ -13,6 +15,10 @@ public class ProductManager {
             product.getDiscount(),
             product.getStock()
         );
+    }
+
+    public List<Product> getProducts() {
+        return new ArrayList<>();
     }
 
     public void displayAllProducts() {
