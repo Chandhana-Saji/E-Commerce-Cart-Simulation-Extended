@@ -339,6 +339,7 @@ queueButton.addActionListener(new ActionListener() {
 addToCartButton.addActionListener(new ActionListener() {
     public void actionPerformed(ActionEvent e) {
         CartFrame.addProductFromListing(
+            customerId,
             productId,
             name,
             price,

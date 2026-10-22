@@ -1,4 +1,3 @@
-
 package database.gui;
 
 import database.DatabaseConnection;
@@ -10,39 +9,27 @@ import java.util.ArrayList;
 
 public class CartFrame extends JFrame {
 
-    private int customerId;
+    private final int customerId;
+    private final JComboBox<String> productBox = new JComboBox<>();
+    private final ArrayList<Integer> productIds = new ArrayList<>();
+    private final ArrayList<String> productNames = new ArrayList<>();
+    private final ArrayList<Double> prices = new ArrayList<>();
+    private final ArrayList<Double> discounts = new ArrayList<>();
+    private final ArrayList<Integer> stocks = new ArrayList<>();
 
-    private JComboBox<String> productBox;
-
-    private ArrayList<Integer> productIds = new ArrayList<>();
-    private ArrayList<String> productNames = new ArrayList<>();
-    private ArrayList<Double> prices = new ArrayList<>();
-    private ArrayList<Double> discounts = new ArrayList<>();
-    private ArrayList<Integer> stocks = new ArrayList<>();
-
-    private DefaultListModel<String> cartModel =
+    private final DefaultListModel<String> cartModel =
             new DefaultListModel<>();
-
-    private JList<String> cartList = new JList<>(cartModel);
-
-    // Shared cart data so products remain when screens change.
-    private static ArrayList<Integer> cartProductIds =
-            new ArrayList<>();
-
-    private static ArrayList<String> cartNames =
-            new ArrayList<>();
-
-    // Stores the discounted unit price.
-    private static ArrayList<Double> cartPrices =
-            new ArrayList<>();
-
-    private static ArrayList<Integer> cartQuantities =
-            new ArrayList<>();
-
-    private JLabel totalLabel = new JLabel("Total: Rs. 0.00");
+    private final JList<String> cartList = new JList<>(cartModel);
+    private final ArrayList<Integer> cartItemIds = new ArrayList<>();
+    private final ArrayList<Integer> cartProductIds = new ArrayList<>();
+    private final ArrayList<String> cartNames = new ArrayList<>();
+    private final ArrayList<Double> cartPrices = new ArrayList<>();
+    private final ArrayList<Double> cartDiscounts = new ArrayList<>();
+    private final ArrayList<Integer> cartQuantities = new ArrayList<>();
+    private final ArrayList<Integer> reservedQuantities = new ArrayList<>();
+    private final JLabel totalLabel = new JLabel("Total: Rs. 0.00");
 
     public CartFrame(int customerId) {
-
         this.customerId = customerId;
 
         setTitle("BuyIt - Shopping Cart");
@@ -51,12 +38,8 @@ public class CartFrame extends JFrame {
         setLocationRelativeTo(null);
         setLayout(new BorderLayout(10, 10));
 
-        JLabel title = new JLabel(
-                "Shopping Cart", JLabel.CENTER
-        );
+        JLabel title = new JLabel("Shopping Cart", JLabel.CENTER);
         title.setFont(new Font("Arial", Font.BOLD, 24));
-
-        productBox = new JComboBox<>();
 
         JButton addButton = new JButton("Add to Cart");
         JButton removeButton = new JButton("Remove Selected");
@@ -65,9 +48,7 @@ public class CartFrame extends JFrame {
         JButton backButton = new JButton("Back to Categories");
 
         JPanel topPanel = new JPanel(new BorderLayout(5, 5));
-        topPanel.setBorder(
-                BorderFactory.createEmptyBorder(10, 10, 5, 10)
-        );
+        topPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 5, 10));
         topPanel.add(title, BorderLayout.NORTH);
         topPanel.add(productBox, BorderLayout.CENTER);
         topPanel.add(addButton, BorderLayout.EAST);
@@ -85,129 +66,191 @@ public class CartFrame extends JFrame {
 
         addButton.addActionListener(e -> addToCart());
         removeButton.addActionListener(e -> removeSelected());
-        refreshButton.addActionListener(e -> loadProducts());
+        refreshButton.addActionListener(e -> {
+            loadProducts();
+            loadCart();
+        });
         checkoutButton.addActionListener(e -> checkout());
-
         backButton.addActionListener(e -> {
             new CategoryFrame(customerId);
             dispose();
         });
 
+        ensureCartSchema();
         loadProducts();
-        updateCartDisplay();
-
+        loadCart();
         setVisible(true);
     }
 
-    // Add a product selected from the product listing screen.
+    // Compatibility overload for any old call site; use the customer-aware
+    // overload from ProductFrame so items are saved to the correct account.
     public static void addProductFromListing(
-            int productId,
-            String name,
-            double price,
-            double discount,
-            int stock
-    ) {
+            int productId, String name, double price,
+            double discount, int stock) {
+        JOptionPane.showMessageDialog(
+                null,
+                "Please open the shopping cart from your logged-in account "
+                + "before adding this product.");
+    }
+
+    public static void addProductFromListing(
+            int customerId, int productId, String name,
+            double price, double discount, int stock) {
+
+        if (customerId <= 0) {
+            JOptionPane.showMessageDialog(null,
+                    "Please log in before adding products to your cart.");
+            return;
+        }
 
         if (stock <= 0) {
-            JOptionPane.showMessageDialog(
-                    null, "This product is out of stock."
-            );
+            JOptionPane.showMessageDialog(null,
+                    "This product is out of stock. Join the waiting queue.");
             return;
         }
 
         String input = JOptionPane.showInputDialog(
-                null,
-                "Enter quantity for " + name + ":",
-                "1"
-        );
-
+                null, "Enter quantity for " + name + ":", "1");
         if (input == null) {
             return;
         }
 
         try {
             int quantity = Integer.parseInt(input);
-
             if (quantity <= 0) {
-                JOptionPane.showMessageDialog(
-                        null,
-                        "Quantity must be greater than zero."
-                );
+                JOptionPane.showMessageDialog(null,
+                        "Quantity must be greater than zero.");
                 return;
             }
 
-            if (quantity > stock) {
-                JOptionPane.showMessageDialog(
-                        null,
-                        "Not enough stock available."
-                );
-                return;
-            }
+            try (Connection con = DatabaseConnection.getConnection()) {
+                con.setAutoCommit(false);
+                try {
+                    ensureCartSchema(con);
+                    int currentStock;
+                    int currentQuantity = 0;
+                    int reservedQuantity = 0;
 
-            int index = cartProductIds.indexOf(productId);
+                    try (PreparedStatement ps = con.prepareStatement(
+                            "SELECT stock FROM Products WHERE product_id=?")) {
+                        ps.setInt(1, productId);
+                        try (ResultSet rs = ps.executeQuery()) {
+                            if (!rs.next()) {
+                                throw new SQLException("Product not found.");
+                            }
+                            currentStock = rs.getInt("stock");
+                        }
+                    }
 
-            if (index != -1) {
+                    try (PreparedStatement ps = con.prepareStatement("""
+                            SELECT quantity, reserved_quantity
+                            FROM Cart_Items
+                            WHERE customer_id=? AND product_id=?
+                            """)) {
+                        ps.setInt(1, customerId);
+                        ps.setInt(2, productId);
+                        try (ResultSet rs = ps.executeQuery()) {
+                            if (rs.next()) {
+                                currentQuantity = rs.getInt("quantity");
+                                reservedQuantity =
+                                        rs.getInt("reserved_quantity");
+                            }
+                        }
+                    }
 
-                int newQuantity =
-                        cartQuantities.get(index) + quantity;
+                    int normalQuantity = currentQuantity - reservedQuantity;
+                    if (normalQuantity + quantity > currentStock) {
+                        throw new SQLException(
+                                "Not enough stock available. Current stock: "
+                                + currentStock);
+                    }
 
-                if (newQuantity > stock) {
-                    JOptionPane.showMessageDialog(
-                            null,
-                            "Not enough stock available."
-                    );
-                    return;
+                    try (PreparedStatement ps = con.prepareStatement("""
+                            INSERT INTO Cart_Items
+                                (customer_id, product_id, quantity,
+                                 reserved_quantity)
+                            VALUES (?, ?, ?, 0)
+                            ON CONFLICT(customer_id, product_id)
+                            DO UPDATE SET
+                                quantity = Cart_Items.quantity + excluded.quantity
+                            """)) {
+                        ps.setInt(1, customerId);
+                        ps.setInt(2, productId);
+                        ps.setInt(3, quantity);
+                        ps.executeUpdate();
+                    }
+
+                    con.commit();
+                    JOptionPane.showMessageDialog(null,
+                            name + " added to your cart!");
+                } catch (SQLException ex) {
+                    con.rollback();
+                    JOptionPane.showMessageDialog(null, ex.getMessage(),
+                            "Unable to Add Product",
+                            JOptionPane.WARNING_MESSAGE);
+                } finally {
+                    con.setAutoCommit(true);
                 }
-
-                cartQuantities.set(index, newQuantity);
-
-            } else {
-
-                cartProductIds.add(productId);
-                cartNames.add(name);
-
-                double finalPrice =
-                        price * (1 - discount / 100.0);
-
-                cartPrices.add(finalPrice);
-                cartQuantities.add(quantity);
+            } catch (SQLException ex) {
+                JOptionPane.showMessageDialog(null,
+                        "Database error: " + ex.getMessage(),
+                        "Database Error", JOptionPane.ERROR_MESSAGE);
             }
+        } catch (NumberFormatException ex) {
+            JOptionPane.showMessageDialog(null,
+                    "Please enter a valid whole number.");
+        }
+    }
 
-            JOptionPane.showMessageDialog(
-                    null,
-                    name + " added to your cart!"
-            );
+    private static void ensureCartSchema(Connection con) throws SQLException {
+        boolean hasReservedQuantity = false;
+        try (PreparedStatement ps =
+                     con.prepareStatement("PRAGMA table_info(Cart_Items)");
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                if ("reserved_quantity".equalsIgnoreCase(
+                        rs.getString("name"))) {
+                    hasReservedQuantity = true;
+                    break;
+                }
+            }
+        }
+        if (!hasReservedQuantity) {
+            try (PreparedStatement ps = con.prepareStatement(
+                    "ALTER TABLE Cart_Items ADD COLUMN "
+                    + "reserved_quantity INTEGER NOT NULL DEFAULT 0")) {
+                ps.executeUpdate();
+            }
+        }
+    }
 
-        } catch (NumberFormatException e) {
-            JOptionPane.showMessageDialog(
-                    null,
-                    "Please enter a valid whole number."
-            );
+    private void ensureCartSchema() {
+        try (Connection con = DatabaseConnection.getConnection()) {
+            ensureCartSchema(con);
+        } catch (SQLException e) {
+            JOptionPane.showMessageDialog(this,
+                    "Unable to prepare shopping cart: " + e.getMessage(),
+                    "Database Error", JOptionPane.ERROR_MESSAGE);
         }
     }
 
     private void loadProducts() {
-
         productBox.removeAllItems();
-
         productIds.clear();
         productNames.clear();
         prices.clear();
         discounts.clear();
         stocks.clear();
 
-        String sql =
-                "SELECT product_id, name, price, discount, stock "
-                + "FROM Products ORDER BY product_id";
+        String sql = """
+            SELECT product_id, name, price, discount, stock
+            FROM Products ORDER BY product_id
+            """;
 
-        try (
-                Connection con = DatabaseConnection.getConnection();
-                Statement st = con.createStatement();
-                ResultSet rs = st.executeQuery(sql)
-        ) {
-
+        try (Connection con = DatabaseConnection.getConnection();
+             Statement st = con.createStatement();
+             ResultSet rs = st.executeQuery(sql)) {
             while (rs.next()) {
-
                 int id = rs.getInt("product_id");
                 String name = rs.getString("name");
                 double price = rs.getDouble("price");
@@ -220,288 +263,258 @@ public class CartFrame extends JFrame {
                 discounts.add(discount);
                 stocks.add(stock);
 
-                double finalPrice =
-                        price * (1 - discount / 100.0);
-
-                productBox.addItem(
-                        name + " (Rs. "
+                double finalPrice = price * (1 - discount / 100.0);
+                productBox.addItem(name + " (Rs. "
                         + String.format("%.2f", finalPrice)
-                        + ", Stock: " + stock + ")"
-                );
+                        + ", Stock: " + stock + ")");
             }
-
             if (productBox.getItemCount() == 0) {
-                JOptionPane.showMessageDialog(
-                        this,
-                        "No products found in database."
-                );
+                productBox.addItem("No products found");
             }
-
         } catch (SQLException e) {
-            JOptionPane.showMessageDialog(
-                    this,
-                    "Unable to load products: " + e.getMessage()
-            );
+            JOptionPane.showMessageDialog(this,
+                    "Unable to load products: " + e.getMessage());
         }
     }
 
     private void addToCart() {
-
         int index = productBox.getSelectedIndex();
-
-        if (index == -1) {
-            JOptionPane.showMessageDialog(
-                    this, "Please select a product."
-            );
+        if (index < 0 || index >= productIds.size()) {
+            JOptionPane.showMessageDialog(this, "Please select a product.");
             return;
         }
 
-        addProductFromListing(
-                productIds.get(index),
-                productNames.get(index),
-                prices.get(index),
-                discounts.get(index),
-                stocks.get(index)
-        );
+        addProductFromListing(customerId, productIds.get(index),
+                productNames.get(index), prices.get(index),
+                discounts.get(index), stocks.get(index));
+        loadCart();
+        loadProducts();
+    }
 
-        updateCartDisplay();
+    private void loadCart() {
+        cartModel.clear();
+        cartItemIds.clear();
+        cartProductIds.clear();
+        cartNames.clear();
+        cartPrices.clear();
+        cartDiscounts.clear();
+        cartQuantities.clear();
+        reservedQuantities.clear();
+
+        String sql = """
+            SELECT ci.cart_item_id, ci.product_id, ci.quantity,
+                   ci.reserved_quantity, p.name, p.price, p.discount
+            FROM Cart_Items ci
+            JOIN Products p ON p.product_id = ci.product_id
+            WHERE ci.customer_id = ?
+            ORDER BY ci.cart_item_id
+            """;
+
+        double total = 0;
+        try (Connection con = DatabaseConnection.getConnection();
+             PreparedStatement ps = con.prepareStatement(sql)) {
+            ensureCartSchema(con);
+            ps.setInt(1, customerId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    int itemId = rs.getInt("cart_item_id");
+                    int productId = rs.getInt("product_id");
+                    int quantity = rs.getInt("quantity");
+                    int reserved = rs.getInt("reserved_quantity");
+                    String name = rs.getString("name");
+                    double price = rs.getDouble("price");
+                    double discount = rs.getDouble("discount");
+                    double finalPrice = price * (1 - discount / 100.0);
+                    double lineTotal = finalPrice * quantity;
+                    total += lineTotal;
+
+                    cartItemIds.add(itemId);
+                    cartProductIds.add(productId);
+                    cartNames.add(name);
+                    cartPrices.add(price);
+                    cartDiscounts.add(discount);
+                    cartQuantities.add(quantity);
+                    reservedQuantities.add(reserved);
+
+                    String note = reserved > 0
+                            ? " | Queue reserved: " + reserved : "";
+                    cartModel.addElement(name + " | Qty: " + quantity
+                            + note + " | Unit price: Rs. "
+                            + String.format("%.2f", finalPrice)
+                            + " | Total: Rs. "
+                            + String.format("%.2f", lineTotal));
+                }
+            }
+        } catch (SQLException e) {
+            JOptionPane.showMessageDialog(this,
+                    "Unable to load cart: " + e.getMessage(),
+                    "Database Error", JOptionPane.ERROR_MESSAGE);
+        }
+
+        totalLabel.setText("Total: Rs. " + String.format("%.2f", total));
     }
 
     private void removeSelected() {
-
         int index = cartList.getSelectedIndex();
-
-        if (index == -1) {
-            JOptionPane.showMessageDialog(
-                    this, "Please select an item to remove."
-            );
+        if (index < 0) {
+            JOptionPane.showMessageDialog(this,
+                    "Please select an item to remove.");
             return;
         }
 
-        cartProductIds.remove(index);
-        cartNames.remove(index);
-        cartPrices.remove(index);
-        cartQuantities.remove(index);
+        int itemId = cartItemIds.get(index);
+        int productId = cartProductIds.get(index);
+        int reserved = reservedQuantities.get(index);
 
-        updateCartDisplay();
+        try (Connection con = DatabaseConnection.getConnection()) {
+            con.setAutoCommit(false);
+            try {
+                if (reserved > 0) {
+                    try (PreparedStatement ps = con.prepareStatement(
+                            "UPDATE Products SET stock = stock + ? "
+                            + "WHERE product_id = ?")) {
+                        ps.setInt(1, reserved);
+                        ps.setInt(2, productId);
+                        ps.executeUpdate();
+                    }
+                }
+                try (PreparedStatement ps = con.prepareStatement(
+                        "DELETE FROM Cart_Items WHERE cart_item_id=? "
+                        + "AND customer_id=?")) {
+                    ps.setInt(1, itemId);
+                    ps.setInt(2, customerId);
+                    ps.executeUpdate();
+                }
+                con.commit();
+            } catch (SQLException e) {
+                con.rollback();
+                throw e;
+            } finally {
+                con.setAutoCommit(true);
+            }
+            loadCart();
+            loadProducts();
+        } catch (SQLException e) {
+            JOptionPane.showMessageDialog(this,
+                    "Unable to remove item: " + e.getMessage());
+        }
     }
 
     private double calculateTotal() {
-
         double total = 0;
-
-        for (int i = 0; i < cartNames.size(); i++) {
-            total += cartPrices.get(i)
-                    * cartQuantities.get(i);
+        for (int i = 0; i < cartQuantities.size(); i++) {
+            double finalPrice = cartPrices.get(i)
+                    * (1 - cartDiscounts.get(i) / 100.0);
+            total += finalPrice * cartQuantities.get(i);
         }
-
         return total;
     }
 
-    private void updateCartDisplay() {
-
-        cartModel.clear();
-
-        for (int i = 0; i < cartNames.size(); i++) {
-
-            double itemTotal =
-                    cartPrices.get(i) * cartQuantities.get(i);
-
-            cartModel.addElement(
-                    cartNames.get(i)
-                    + " | Qty: " + cartQuantities.get(i)
-                    + " | Unit price: Rs. "
-                    + String.format("%.2f", cartPrices.get(i))
-                    + " | Total: Rs. "
-                    + String.format("%.2f", itemTotal)
-            );
-        }
-
-        totalLabel.setText(
-                "Total: Rs. "
-                + String.format("%.2f", calculateTotal())
-        );
-    }
-
     private void checkout() {
-
-        if (customerId <= 0) {
-            JOptionPane.showMessageDialog(
-                    this,
-                    "Please log in again before checkout."
-            );
-            return;
-        }
-
+        loadCart();
         if (cartProductIds.isEmpty()) {
-            JOptionPane.showMessageDialog(
-                    this, "Your cart is empty."
-            );
+            JOptionPane.showMessageDialog(this, "Your cart is empty.");
             return;
         }
 
+        double total = calculateTotal();
         int confirm = JOptionPane.showConfirmDialog(
                 this,
-                "Place order for Rs. "
-                + String.format("%.2f", calculateTotal()) + "?",
-                "Confirm Order",
-                JOptionPane.YES_NO_OPTION
-        );
-
+                "Place order for Rs. " + String.format("%.2f", total) + "?",
+                "Confirm Order", JOptionPane.YES_NO_OPTION);
         if (confirm != JOptionPane.YES_OPTION) {
             return;
         }
 
-        String orderSql =
-                "INSERT INTO Orders "
-                + "(customer_id, total_amount, status) "
-                + "VALUES (?, ?, ?)";
-
-        String itemSql =
-                "INSERT INTO Order_Items "
-                + "(order_id, product_id, quantity, unit_price, "
-                + "discount_at_purchase) "
-                + "VALUES (?, ?, ?, ?, ?)";
-
-        String stockSql =
-                "UPDATE Products SET stock = stock - ? "
-                + "WHERE product_id = ? AND stock >= ?";
+        String orderSql = """
+            INSERT INTO Orders (customer_id, total_amount, status)
+            VALUES (?, ?, 'PLACED')
+            """;
+        String itemSql = """
+            INSERT INTO Order_Items
+                (order_id, product_id, quantity, unit_price,
+                 discount_at_purchase)
+            VALUES (?, ?, ?, ?, ?)
+            """;
 
         try (Connection con = DatabaseConnection.getConnection()) {
-
             con.setAutoCommit(false);
-
             try {
-
+                ensureCartSchema(con);
                 int orderId;
-
                 try (PreparedStatement ps = con.prepareStatement(
-                        orderSql, Statement.RETURN_GENERATED_KEYS
-                )) {
-
+                        orderSql, Statement.RETURN_GENERATED_KEYS)) {
                     ps.setInt(1, customerId);
-                    ps.setDouble(2, calculateTotal());
-                    ps.setString(3, "PLACED");
+                    ps.setDouble(2, total);
                     ps.executeUpdate();
-
                     try (ResultSet keys = ps.getGeneratedKeys()) {
-
                         if (!keys.next()) {
-                            throw new SQLException(
-                                    "Could not create order ID."
-                            );
+                            throw new SQLException("Could not create order ID.");
                         }
-
                         orderId = keys.getInt(1);
                     }
                 }
 
                 for (int i = 0; i < cartProductIds.size(); i++) {
-
                     int productId = cartProductIds.get(i);
                     int quantity = cartQuantities.get(i);
+                    int reserved = reservedQuantities.get(i);
+                    int normalQuantity = quantity - reserved;
 
-                    // Update stock only when sufficient stock exists.
-                    try (PreparedStatement ps =
-                                 con.prepareStatement(stockSql)) {
-
-                        ps.setInt(1, quantity);
-                        ps.setInt(2, productId);
-                        ps.setInt(3, quantity);
-
-                        if (ps.executeUpdate() != 1) {
-                            throw new SQLException(
-                                    "Insufficient stock for "
-                                    + cartNames.get(i)
-                                    + ". Please refresh and try again."
-                            );
-                        }
-                    }
-
-                    int productIndex = productIds.indexOf(productId);
-
-                    // Read the current product price and discount
-                    // from the database for the order record.
-                    double originalPrice;
-                    double discount;
-
-                    String priceSql =
-                            "SELECT price, discount FROM Products "
-                            + "WHERE product_id = ?";
-
-                    try (PreparedStatement ps =
-                                 con.prepareStatement(priceSql)) {
-
-                        ps.setInt(1, productId);
-
-                        try (ResultSet rs = ps.executeQuery()) {
-
-                            if (!rs.next()) {
+                    // Queue-reserved units already reduced stock during
+                    // queue processing. Only deduct non-reserved units now.
+                    if (normalQuantity > 0) {
+                        try (PreparedStatement ps = con.prepareStatement("""
+                                UPDATE Products SET stock = stock - ?
+                                WHERE product_id = ? AND stock >= ?
+                                """)) {
+                            ps.setInt(1, normalQuantity);
+                            ps.setInt(2, productId);
+                            ps.setInt(3, normalQuantity);
+                            if (ps.executeUpdate() != 1) {
                                 throw new SQLException(
-                                        "Product no longer exists: "
+                                        "Insufficient stock for "
                                         + cartNames.get(i)
-                                );
+                                        + ". Refresh and try again.");
                             }
-
-                            originalPrice = rs.getDouble("price");
-                            discount = rs.getDouble("discount");
                         }
                     }
 
-                    // Store the original price and discount
-                    // at the time of purchase.
-                    try (PreparedStatement ps =
-                                 con.prepareStatement(itemSql)) {
-
+                    try (PreparedStatement ps = con.prepareStatement(itemSql)) {
                         ps.setInt(1, orderId);
                         ps.setInt(2, productId);
                         ps.setInt(3, quantity);
-                        ps.setDouble(4, originalPrice);
-                        ps.setDouble(5, discount);
-
+                        ps.setDouble(4, cartPrices.get(i));
+                        ps.setDouble(5, cartDiscounts.get(i));
                         ps.executeUpdate();
                     }
                 }
 
+                try (PreparedStatement ps = con.prepareStatement(
+                        "DELETE FROM Cart_Items WHERE customer_id=?")) {
+                    ps.setInt(1, customerId);
+                    ps.executeUpdate();
+                }
+
                 con.commit();
-
-                JOptionPane.showMessageDialog(
-                        this,
-                        "Order placed successfully!\n"
-                        + "Order ID: " + orderId + "\n"
-                        + "Total: Rs. "
-                        + String.format("%.2f", calculateTotal())
-                );
-
-                cartProductIds.clear();
-                cartNames.clear();
-                cartPrices.clear();
-                cartQuantities.clear();
-
-                updateCartDisplay();
+                JOptionPane.showMessageDialog(this,
+                        "Order placed successfully!\nOrder ID: " + orderId
+                        + "\nTotal: Rs. " + String.format("%.2f", total));
+                loadCart();
                 loadProducts();
-
             } catch (SQLException e) {
-
                 con.rollback();
-
-                JOptionPane.showMessageDialog(
-                        this,
+                JOptionPane.showMessageDialog(this,
                         "Order failed. Changes were rolled back.\n"
                         + e.getMessage(),
-                        "Checkout Error",
-                        JOptionPane.ERROR_MESSAGE
-                );
-
+                        "Checkout Error", JOptionPane.ERROR_MESSAGE);
             } finally {
                 con.setAutoCommit(true);
             }
-
         } catch (SQLException e) {
-            JOptionPane.showMessageDialog(
-                    this,
-                    "Database error: " + e.getMessage()
-            );
+            JOptionPane.showMessageDialog(this,
+                    "Database error: " + e.getMessage(),
+                    "Database Error", JOptionPane.ERROR_MESSAGE);
         }
     }
 }
